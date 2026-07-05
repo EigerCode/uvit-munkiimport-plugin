@@ -100,6 +100,8 @@ jobs:
           codesign --verify --verbose build/Build/Products/Release/UVITRepo.plugin
 
       - name: Assemble installer .pkg
+        env:
+          MACOS_DEV_ID_APP_NAME: ${{ vars.MACOS_DEV_ID_APP_NAME }}
         run: |
           set -e
           VERSION="${{ github.event.release.tag_name }}"
@@ -107,9 +109,22 @@ jobs:
           VERSION="${VERSION#v}"
 
           mkdir -p payload/usr/local/munki/repoplugins
+          # ditto preserves the bundle (and any signature); plain cp of a bundle is unsafe.
+          ditto build/Build/Products/Release/UVITRepo.plugin \
+                payload/usr/local/munki/repoplugins/UVITRepo.plugin
           chmod -R 755 payload
-          cp build/Build/Products/Release/UVITRepo.plugin \
-             payload/usr/local/munki/repoplugins/
+          # Re-sign the plugin IN its final payload location so the packaged binary
+          # is definitely Developer ID + hardened-runtime signed (notarization
+          # rejected an unsigned inner binary otherwise).
+          if [ -n "$MACOS_DEV_ID_APP_NAME" ]; then
+            codesign --force --options runtime --timestamp \
+              --sign "$MACOS_DEV_ID_APP_NAME" \
+              payload/usr/local/munki/repoplugins/UVITRepo.plugin
+            codesign -dvvv payload/usr/local/munki/repoplugins/UVITRepo.plugin 2>&1 \
+              | grep -iE "Authority|TeamIdentifier|flags|Signature|Identifier" || true
+            codesign --verify --strict --verbose=2 \
+              payload/usr/local/munki/repoplugins/UVITRepo.plugin
+          fi
 
           pkgbuild \
             --root payload \
