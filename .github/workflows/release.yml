@@ -4,16 +4,21 @@ name: Build & Release UVITRepo plugin
 # UVITRepo.plugin, wraps it in a signed + notarized .pkg, and attaches
 # the .pkg to the release.
 #
-# Required secrets (same set used by uvit-agent and uvit-hub-mac):
+# SECRETS (sensitive — Settings > Secrets and variables > Actions > Secrets):
 #   MACOS_DEV_ID_APP_P12         — Developer ID Application cert, base64-encoded .p12
 #   MACOS_DEV_ID_APP_PASSWORD    — passphrase for the Application .p12
-#   MACOS_DEV_ID_APP_NAME        — "Developer ID Application: EigerCode GmbH (TEAMID)"
 #   MACOS_DEV_ID_INST_P12        — Developer ID Installer cert, base64-encoded .p12
 #   MACOS_DEV_ID_INST_PASSWORD   — passphrase for the Installer .p12
-#   MACOS_DEV_ID_INST_NAME       — "Developer ID Installer: EigerCode GmbH (TEAMID)"
 #   MACOS_NOTARIZE_APPLE_ID      — Apple ID used for notarization
 #   MACOS_NOTARIZE_PASSWORD      — app-specific password for notarytool
+#
+# VARIABLES (non-sensitive, publicly visible anyway — Actions > Variables):
+#   MACOS_DEV_ID_APP_NAME        — "Developer ID Application: EigerCode GmbH (TEAMID)"
+#   MACOS_DEV_ID_INST_NAME       — "Developer ID Installer: EigerCode GmbH (TEAMID)"
 #   MACOS_NOTARIZE_TEAM_ID       — Apple Developer Team ID (e.g. J538HP6KK5)
+#
+# Same values as uvit-agent/uvit-hub-mac. Prefer org-level, scoped to the
+# signing repos.
 #
 # Without these secrets the workflow still builds and attaches an unsigned .pkg
 # (suitable for internal testing on your own fleet).
@@ -83,7 +88,7 @@ jobs:
       - name: Sign dylib with Developer ID Application
         if: env.MACOS_DEV_ID_APP_NAME != ''
         env:
-          MACOS_DEV_ID_APP_NAME: ${{ secrets.MACOS_DEV_ID_APP_NAME }}
+          MACOS_DEV_ID_APP_NAME: ${{ vars.MACOS_DEV_ID_APP_NAME }}
         run: |
           set -e
           codesign \
@@ -118,7 +123,7 @@ jobs:
       - name: Sign installer .pkg with Developer ID Installer
         if: env.MACOS_DEV_ID_INST_NAME != ''
         env:
-          MACOS_DEV_ID_INST_NAME: ${{ secrets.MACOS_DEV_ID_INST_NAME }}
+          MACOS_DEV_ID_INST_NAME: ${{ vars.MACOS_DEV_ID_INST_NAME }}
         run: |
           set -e
           productsign \
@@ -137,7 +142,7 @@ jobs:
         env:
           MACOS_NOTARIZE_APPLE_ID: ${{ secrets.MACOS_NOTARIZE_APPLE_ID }}
           MACOS_NOTARIZE_PASSWORD: ${{ secrets.MACOS_NOTARIZE_PASSWORD }}
-          MACOS_NOTARIZE_TEAM_ID: ${{ secrets.MACOS_NOTARIZE_TEAM_ID }}
+          MACOS_NOTARIZE_TEAM_ID: ${{ vars.MACOS_NOTARIZE_TEAM_ID }}
         run: |
           set -e
           xcrun notarytool submit \
