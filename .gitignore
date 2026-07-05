@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+
+# Xcode user data
+*.xcodeproj/project.xcworkspace/
+*.xcodeproj/xcuserdata/
+
+# build and packaging temp dirs
+build/
+payload/
+
+# built packages
+*.pkg
