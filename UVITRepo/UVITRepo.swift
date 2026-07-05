@@ -37,9 +37,9 @@ class HTTPRepoError: Error, CustomStringConvertible {
     public var description: String {
         switch statusCode {
         case 401:
-            return "HTTP 401 Unauthorized — check that UVIT_TOKEN is set and not expired"
+            return "HTTP 401 Unauthorized — check that UVIT_TOKEN (uvit_pat_…) is set and valid"
         case 403:
-            return "HTTP 403 Forbidden — token lacks permission for this tenant/repo"
+            return "HTTP 403 Forbidden — token owner is not authorized for the target tenant/repo"
         default:
             let suffix = body.isEmpty ? "" : ": \(body.prefix(200))"
             return "HTTP error \(statusCode)\(suffix)"
@@ -73,18 +73,26 @@ private func throwIfStatusNotOK(_ response: URLResponse, body: Data = Data()) th
 /// Read from the macOS preferences domain `ch.eigercode.uvit.munkiimport`, with
 /// environment variable fallbacks:
 ///
-/// | Pref key      | Env var       | Description                                           |
-/// |---------------|---------------|-------------------------------------------------------|
-/// | `uvitToken`   | `UVIT_TOKEN`  | Bearer JWT minted from the UVIT console (required).   |
-/// |               |               | The JWT already encodes tenant + repo binding.        |
-/// | `uvitTarget`  | `UVIT_TARGET` | Optional target hint (`global` or `tenant:<id>`).     |
-/// |               |               | Supplementary — the JWT carries the binding.          |
-/// | `uvitRepoID`  | `UVIT_REPO_ID`| Optional repo-ID hint. Same note as uvitTarget.       |
+/// | Pref key      | Env var        | Required | Description                                        |
+/// |---------------|----------------|----------|----------------------------------------------------|
+/// | `uvitToken`   | `UVIT_TOKEN`   | Yes      | Opaque API token from My Account → API Tokens      |
+/// |               |                |          | in the UVIT console (`uvit_pat_…`).                |
+/// | `uvitTarget`  | `UVIT_TARGET`  | Yes      | `global` or `tenant:<id>`. Authoritative: the      |
+/// |               |                |          | server resolves the tenant from this value and      |
+/// |               |                |          | checks the token owner's membership. Requests       |
+/// |               |                |          | without a target are rejected with 400.             |
+/// | `uvitRepoID`  | `UVIT_REPO_ID` | Writes   | Numeric repo ID; required for PUT/DELETE on         |
+/// |               |                |          | pkgs and pkgsinfo. Find it in the UVIT console      |
+/// |               |                |          | under Admin > Software Repos.                       |
 ///
 /// Write system-wide prefs (requires sudo):
 ///
 ///   sudo defaults write /Library/Preferences/ch.eigercode.uvit.munkiimport \
-///     uvitToken "eyJ..."
+///     uvitToken "uvit_pat_..."
+///   sudo defaults write /Library/Preferences/ch.eigercode.uvit.munkiimport \
+///     uvitTarget "tenant:42"
+///   sudo defaults write /Library/Preferences/ch.eigercode.uvit.munkiimport \
+///     uvitRepoID "7"
 ///
 /// ## Endpoint mapping
 ///
@@ -118,12 +126,24 @@ class UVITRepo: Repo {
         }
         self.baseURL = parsedURL
         loadCredentials()
+        // UVIT_TARGET is required: the server resolves the tenant from it and
+        // rejects requests without a target with 400.
+        if target.isEmpty {
+            throw RepoError(
+                "UVIT_TARGET is not set. " +
+                "Set uvitTarget in /Library/Preferences/\(Self.prefsDomain).plist " +
+                "or export UVIT_TARGET=global (or tenant:<id>)."
+            )
+        }
     }
 
     // MARK: - Credential loading
 
     /// Loads credentials from the macOS preferences domain
     /// `ch.eigercode.uvit.munkiimport`, falling back to environment variables.
+    ///
+    /// Prints a warning to stderr if the token or target is missing; `init`
+    /// throws if target is empty (the server rejects requests without it).
     private func loadCredentials() {
         let prefs = UserDefaults(suiteName: Self.prefsDomain)
         let env = ProcessInfo.processInfo.environment
@@ -133,26 +153,33 @@ class UVITRepo: Repo {
         repoID = prefs?.string(forKey: "uvitRepoID") ?? env["UVIT_REPO_ID"] ?? ""
 
         if token.isEmpty {
-            fputs("[UVITRepo] WARNING: No token found in preferences or environment.\n", stderr)
-            fputs("[UVITRepo] Set uvitToken in /Library/Preferences/\(Self.prefsDomain).plist\n", stderr)
-            fputs("[UVITRepo] or export UVIT_TOKEN=<token> before running munkiimport.\n", stderr)
+            fputs("[UVITRepo] WARNING: UVIT_TOKEN not found. Set uvitToken in\n", stderr)
+            fputs("[UVITRepo]   /Library/Preferences/\(Self.prefsDomain).plist\n", stderr)
+            fputs("[UVITRepo] or export UVIT_TOKEN=uvit_pat_...\n", stderr)
+        }
+        if target.isEmpty {
+            fputs("[UVITRepo] ERROR: UVIT_TARGET not set (required). Use 'global' or 'tenant:<id>'.\n", stderr)
         }
     }
 
     // MARK: - Request builder
 
-    /// Returns a URLRequest with auth headers applied.
+    /// Returns a URLRequest with all required UVIT auth headers applied.
     ///
-    /// - Parameter includeRepoID: Pass `true` for mutating requests
-    ///   (PUT/DELETE on pkgs and pkgsinfo). Adds `X-UVIT-Repo-ID` if configured.
+    /// Every request carries `Authorization: Bearer <token>` and
+    /// `X-UVIT-Target: <target>`. The server uses the target to resolve the
+    /// tenant and verify the token owner's membership; it does NOT read
+    /// tenant or repo from the token itself (the token is opaque).
+    ///
+    /// - Parameter includeRepoID: Pass `true` for mutating requests (PUT/DELETE
+    ///   on pkgs and pkgsinfo) to also add `X-UVIT-Repo-ID`.
     private func baseRequest(_ url: URL, includeRepoID: Bool = false) -> URLRequest {
         var request = URLRequest(url: url)
         if !token.isEmpty {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
-        if !target.isEmpty {
-            request.setValue(target, forHTTPHeaderField: "X-UVIT-Target")
-        }
+        // X-UVIT-Target is required on every request; validated in init().
+        request.setValue(target, forHTTPHeaderField: "X-UVIT-Target")
         if includeRepoID && !repoID.isEmpty {
             request.setValue(repoID, forHTTPHeaderField: "X-UVIT-Repo-ID")
         }

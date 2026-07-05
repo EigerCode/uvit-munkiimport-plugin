@@ -20,18 +20,28 @@ This installs `UVITRepo.plugin` into `/usr/local/munki/repoplugins/`.
 
 ## Configuration
 
-### 1. Get an ingest token
+### 1. Get an API token
 
-Log in to the UVIT console, navigate to **Admin > Software Repos**, select the
-repo you want to push to, and click **Generate Ingest Token**. Copy the JWT
-that is shown — this is your `UVIT_TOKEN`.
+Log in to the UVIT console and go to **My Account → API Tokens → Create Token**
+(`/myaccount/tokens`). Copy the generated token — it looks like `uvit_pat_…`.
+This is your `UVIT_TOKEN`.
 
-The token encodes the tenant and repo binding, so you do not need to set
-`UVIT_TARGET` or `UVIT_REPO_ID` separately (they are already embedded in the
-JWT). Those variables are accepted as supplementary headers for forward
-compatibility.
+The token identifies you as a user. The server checks your membership for the
+target you specify (`UVIT_TARGET`); it does not read a tenant or repo from the
+token itself.
 
-### 2. Configure munkiimport
+### 2. Find your target and repo ID
+
+- **`UVIT_TARGET`**: `global` if you are a sysadmin pushing to the global scope,
+  or `tenant:<id>` (e.g. `tenant:42`) for a specific tenant. The server uses
+  this value to resolve the tenant and verify that the token owner is a member.
+  Requests without a target are rejected with 400.
+
+- **`UVIT_REPO_ID`**: the numeric ID of the Software Repo to write to. Find it
+  in the UVIT console under **Admin > Software Repos** — the ID is shown in the
+  repo detail view.
+
+### 3. Configure munkiimport
 
 ```
 munkiimport --configure
@@ -51,12 +61,14 @@ repo_url = https://console.uvit.eigercode.ch/api/repo
 plugin   = UVITRepo
 ```
 
-### 3. Supply credentials
+### 4. Supply credentials
 
 **Option A — environment variables (session-scoped):**
 
 ```bash
-export UVIT_TOKEN="eyJ..."
+export UVIT_TOKEN="uvit_pat_..."
+export UVIT_TARGET="tenant:42"
+export UVIT_REPO_ID="7"
 munkiimport GoogleChrome.dmg
 ```
 
@@ -64,13 +76,17 @@ munkiimport GoogleChrome.dmg
 
 ```bash
 sudo defaults write /Library/Preferences/ch.eigercode.uvit.munkiimport \
-  uvitToken "eyJ..."
+  uvitToken "uvit_pat_..."
+sudo defaults write /Library/Preferences/ch.eigercode.uvit.munkiimport \
+  uvitTarget "tenant:42"
+sudo defaults write /Library/Preferences/ch.eigercode.uvit.munkiimport \
+  uvitRepoID "7"
 ```
 
-Read the stored token back to verify:
+Read them back to verify:
 
 ```bash
-sudo defaults read /Library/Preferences/ch.eigercode.uvit.munkiimport uvitToken
+sudo defaults read /Library/Preferences/ch.eigercode.uvit.munkiimport
 ```
 
 ## Usage
@@ -99,37 +115,43 @@ Add these variables to your AutoPkg preferences or pass them on the command line
 <string>UVITRepo</string>
 ```
 
-Set `UVIT_TOKEN` in the environment before running AutoPkg:
+Set the UVIT variables in the environment before running AutoPkg:
 
 ```bash
-export UVIT_TOKEN="eyJ..."
+export UVIT_TOKEN="uvit_pat_..."
+export UVIT_TARGET="tenant:42"
+export UVIT_REPO_ID="7"
 autopkg run com.github.autopkg.recipe.GoogleChromePkg.munki
 ```
 
 ## Environment variables / preference keys
 
-| Env var        | Pref key      | Required | Description                                           |
-|----------------|---------------|----------|-------------------------------------------------------|
-| `UVIT_TOKEN`   | `uvitToken`   | Yes      | Bearer JWT from the UVIT console. Encodes tenant+repo.|
-| `UVIT_TARGET`  | `uvitTarget`  | No       | Optional target hint (`global` or `tenant:<id>`).     |
-| `UVIT_REPO_ID` | `uvitRepoID`  | No       | Optional repo-ID hint (already in the JWT).           |
+| Env var        | Pref key      | Required        | Description                                                 |
+|----------------|---------------|-----------------|-------------------------------------------------------------|
+| `UVIT_TOKEN`   | `uvitToken`   | Yes             | Opaque API token from My Account → API Tokens (`uvit_pat_…`). |
+| `UVIT_TARGET`  | `uvitTarget`  | Yes             | `global` or `tenant:<id>`. Sent on every request. The server |
+|                |               |                 | resolves the tenant from this value and checks membership.   |
+| `UVIT_REPO_ID` | `uvitRepoID`  | For writes      | Numeric repo ID; required for PUT/DELETE on pkgs/pkgsinfo.  |
 
 Preferences domain: `ch.eigercode.uvit.munkiimport`
 
 ## Endpoint mapping
 
-| Munki call                             | UVIT API endpoint                               |
-|----------------------------------------|-------------------------------------------------|
-| `list("pkgsinfo")`                     | `GET <repo_url>/pkgsinfo`                       |
-| `list(<other kind>)`                   | returns `[]` (see Known Limitations below)      |
-| `get("pkgsinfo/<name>/<ver>.plist")`   | `GET <repo_url>/pkgsinfo/<name>/<ver>.plist`    |
-| `get("pkgs/<path>")`                   | `GET <repo_url>/pkgs/<path>` → 307 to S3        |
-| `put("pkgs/<path>", fromFile:)`        | `PUT <repo_url>/pkgs/<path>`                    |
-| `put("pkgsinfo/<path>", content:)`     | `PUT <repo_url>/pkgsinfo/<path>`                |
-| `delete("pkgsinfo/<path>")`            | `DELETE <repo_url>/pkgsinfo/<path>`             |
-| `delete("pkgs/<path>")`                | `DELETE <repo_url>/pkgs/<path>`                 |
-| `pathFor(_)`                           | `nil` (non-filesystem repo)                     |
-| `makecatalogs` (called by Munki tools) | `POST <repo_url>/makecatalogs` → no-op 200      |
+| Munki call                             | UVIT API endpoint                               | Headers                          |
+|----------------------------------------|-------------------------------------------------|----------------------------------|
+| `list("pkgsinfo")`                     | `GET <repo_url>/pkgsinfo`                       | Auth + Target                    |
+| `list(<other kind>)`                   | returns `[]` (see Known Limitations below)      | —                                |
+| `get("pkgsinfo/<name>/<ver>.plist")`   | `GET <repo_url>/pkgsinfo/<name>/<ver>.plist`    | Auth + Target                    |
+| `get("pkgs/<path>")`                   | `GET <repo_url>/pkgs/<path>` → 307 to S3        | Auth + Target                    |
+| `put("pkgs/<path>", fromFile:)`        | `PUT <repo_url>/pkgs/<path>`                    | Auth + Target + Repo-ID          |
+| `put("pkgsinfo/<path>", content:)`     | `PUT <repo_url>/pkgsinfo/<path>`                | Auth + Target + Repo-ID          |
+| `delete("pkgsinfo/<path>")`            | `DELETE <repo_url>/pkgsinfo/<path>`             | Auth + Target + Repo-ID          |
+| `delete("pkgs/<path>")`                | `DELETE <repo_url>/pkgs/<path>`                 | Auth + Target + Repo-ID          |
+| `pathFor(_)`                           | `nil` (non-filesystem repo)                     | —                                |
+| `makecatalogs` (called by Munki tools) | `POST <repo_url>/makecatalogs` → no-op 200      | Auth + Target                    |
+
+Header names: `Authorization: Bearer <token>`, `X-UVIT-Target: <target>`,
+`X-UVIT-Repo-ID: <repoID>`.
 
 ## Known limitations
 
