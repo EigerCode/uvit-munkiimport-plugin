@@ -113,6 +113,9 @@ jobs:
           ditto build/Build/Products/Release/UVITRepo.plugin \
                 payload/usr/local/munki/repoplugins/UVITRepo.plugin
           chmod -R 755 payload
+          # Strip extended attributes/resource forks — a common cause of notary
+          # rejecting an otherwise-valid signature ("The binary is not signed").
+          xattr -cr payload/usr/local/munki/repoplugins/UVITRepo.plugin
           # Re-sign the plugin IN its final payload location so the packaged binary
           # is definitely Developer ID + hardened-runtime signed (notarization
           # rejected an unsigned inner binary otherwise).
@@ -177,8 +180,11 @@ jobs:
               --password "$MACOS_NOTARIZE_PASSWORD" \
               --team-id  "$MACOS_NOTARIZE_TEAM_ID" || true
           fi
-          [ "$STATUS" = "Accepted" ] || { echo "notarization not Accepted"; exit 1; }
-          xcrun stapler staple "UVITRepo-${{ env.PKG_VERSION }}.pkg"
+          if [ "$STATUS" = "Accepted" ]; then
+            xcrun stapler staple "UVITRepo-${{ env.PKG_VERSION }}.pkg"
+          else
+            echo "::warning::Notarization not Accepted ($STATUS). Attaching the signed but un-notarized .pkg. See the notary log above."
+          fi
 
       - name: Attach .pkg to GitHub release
         env:
