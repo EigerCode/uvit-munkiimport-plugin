@@ -145,12 +145,24 @@ jobs:
           MACOS_NOTARIZE_TEAM_ID: ${{ vars.MACOS_NOTARIZE_TEAM_ID }}
         run: |
           set -e
-          xcrun notarytool submit \
+          SUB=$(xcrun notarytool submit \
             "UVITRepo-${{ env.PKG_VERSION }}.pkg" \
             --apple-id  "$MACOS_NOTARIZE_APPLE_ID" \
             --password  "$MACOS_NOTARIZE_PASSWORD" \
             --team-id   "$MACOS_NOTARIZE_TEAM_ID" \
-            --wait
+            --wait --output-format json 2>&1) || true
+          echo "$SUB"
+          ID=$(echo "$SUB" | python3 -c "import sys,json;print(json.load(sys.stdin).get('id',''))" 2>/dev/null || true)
+          STATUS=$(echo "$SUB" | python3 -c "import sys,json;print(json.load(sys.stdin).get('status',''))" 2>/dev/null || true)
+          echo "notary status: $STATUS (id $ID)"
+          if [ -n "$ID" ]; then
+            echo "=== notary log ==="
+            xcrun notarytool log "$ID" \
+              --apple-id "$MACOS_NOTARIZE_APPLE_ID" \
+              --password "$MACOS_NOTARIZE_PASSWORD" \
+              --team-id  "$MACOS_NOTARIZE_TEAM_ID" || true
+          fi
+          [ "$STATUS" = "Accepted" ] || { echo "notarization not Accepted"; exit 1; }
           xcrun stapler staple "UVITRepo-${{ env.PKG_VERSION }}.pkg"
 
       - name: Attach .pkg to GitHub release
