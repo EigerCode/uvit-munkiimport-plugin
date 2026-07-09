@@ -151,7 +151,10 @@ jobs:
             "UVITRepo-${{ env.PKG_VERSION }}.pkg"
 
       - name: Use unsigned pkg if signing was skipped
-        if: env.MACOS_DEV_ID_INST_NAME == ''
+        # vars context, NOT env: the sign step's step-level env is invisible
+        # here, so an env check was always empty and this cp overwrote the
+        # signed pkg with the unsigned one (v0.1.4 notary "not signed").
+        if: vars.MACOS_DEV_ID_INST_NAME == ''
         run: |
           cp UVITRepo-unsigned.pkg "UVITRepo-${{ env.PKG_VERSION }}.pkg"
 
