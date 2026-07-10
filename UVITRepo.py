@@ -12,6 +12,10 @@
 # Munki 7.x as the Munki 6.7 compatibility component). AutoPkg therefore
 # needs this file, installed at /usr/local/munki/munkilib/munkirepo/UVITRepo.py.
 #
+# HTTP goes through /usr/bin/curl (like Munki's MWA2APIRepo): AutoPkg's and
+# Munki's bundled Pythons ship without a usable CA bundle, so urllib fails
+# TLS verification; curl uses the system trust store.
+#
 # Configuration (prefs domain ch.eigercode.uvit.munkiimport, env fallback):
 #   uvitToken  / UVIT_TOKEN    — required; opaque API token (uvit_pat_...)
 #   uvitTarget / UVIT_TARGET   — required; "global" or "tenant:<id>"
@@ -24,17 +28,17 @@ from __future__ import absolute_import, print_function
 
 import json
 import os
-import shutil
+import subprocess
 import sys
-import urllib.error
+import tempfile
 import urllib.parse
-import urllib.request
 
 from munkilib.munkirepo import Repo, RepoError
 
 PREFS_DOMAIN = "ch.eigercode.uvit.munkiimport"
 
-DEFAULT_TIMEOUT = 120  # seconds; large uploads stream, so this is per-read
+CURL = "/usr/bin/curl"
+CONNECT_TIMEOUT = "30"
 
 
 def _pref(key):
@@ -52,20 +56,26 @@ def _pref(key):
     return str(value)
 
 
-class _AuthStrippingRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Follows redirects, but drops auth headers when leaving the API host.
+def _parse_header_dump(path):
+    """Returns (status_code, headers_dict) from a curl --dump-header file.
 
-    GET /pkgs/<path> answers with a 307 to a presigned S3 URL; the bearer
-    token and X-UVIT-* headers must not be forwarded there."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        new = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if new is None:
-            return None
-        if urllib.parse.urlsplit(newurl).netloc != urllib.parse.urlsplit(req.full_url).netloc:
-            for header in ("Authorization", "X-uvit-target", "X-uvit-repo-id"):
-                new.headers.pop(header, None)
-        return new
+    The dump may contain several blocks (e.g. '100 Continue' before the
+    final response); the last status line and its headers win."""
+    status = 0
+    headers = {}
+    with open(path, encoding="utf-8", errors="replace") as fileobj:
+        for line in fileobj:
+            line = line.strip()
+            if line.upper().startswith("HTTP/"):
+                try:
+                    status = int(line.split()[1])
+                except (IndexError, ValueError):
+                    status = 0
+                headers = {}
+            elif ":" in line:
+                key, _, value = line.partition(":")
+                headers[key.strip().lower()] = value.strip()
+    return status, headers
 
 
 class UVITRepo(Repo):
@@ -76,7 +86,6 @@ class UVITRepo(Repo):
         self.token = _pref("uvitToken") or os.environ.get("UVIT_TOKEN", "")
         self.target = _pref("uvitTarget") or os.environ.get("UVIT_TARGET", "")
         self.repo_id = _pref("uvitRepoID") or os.environ.get("UVIT_REPO_ID", "")
-        self._opener = urllib.request.build_opener(_AuthStrippingRedirectHandler())
 
         if not self.token:
             print(
@@ -93,48 +102,114 @@ class UVITRepo(Repo):
                 "(or tenant:<id>)." % PREFS_DOMAIN
             )
 
-    # -- HTTP helpers ------------------------------------------------------
+    # -- HTTP via curl -----------------------------------------------------
 
-    def _request(self, identifier, method="GET", body=None,
-                 include_repo_id=False, accept=None):
-        url = self.baseurl + "/" + urllib.parse.quote(identifier)
-        request = urllib.request.Request(url, data=body, method=method)
+    def _run_curl(self, url, method="GET", headers=None, upload_file=None,
+                  output_file=None):
+        """Performs one HTTP request. Returns (status, headers, body).
+
+        Redirects are NOT followed here: curl forwards custom -H headers to
+        redirect targets, which would leak the bearer token (and break S3
+        presigned auth). Callers follow redirects explicitly.
+
+        body is None when output_file is given (curl streams to it).
+        Request headers go through a temp file (--header @file) so the
+        token never appears in the process list."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            header_dump = os.path.join(tmpdir, "response_headers")
+            header_file = os.path.join(tmpdir, "request_headers")
+            body_path = output_file or os.path.join(tmpdir, "body")
+
+            with open(header_file, "w", encoding="utf-8") as fileobj:
+                for key, value in (headers or {}).items():
+                    fileobj.write("%s: %s\n" % (key, value))
+
+            cmd = [
+                CURL, "--silent", "--show-error",
+                "--connect-timeout", CONNECT_TIMEOUT,
+                "--dump-header", header_dump,
+                "--header", "@%s" % header_file,
+                "--output", body_path,
+            ]
+            if upload_file:
+                # --upload-file streams the file and implies PUT.
+                cmd.extend(["--upload-file", upload_file])
+            elif method != "GET":
+                cmd.extend(["--request", method])
+            cmd.append(url)
+
+            try:
+                proc = subprocess.run(
+                    cmd, capture_output=True, text=True, check=False)
+            except OSError as err:
+                raise RepoError("Could not run curl: %s" % err) from err
+            if proc.returncode != 0:
+                raise RepoError(
+                    "Connection error: %s" % proc.stderr.strip())
+
+            status, response_headers = _parse_header_dump(header_dump)
+            body = None
+            if not output_file:
+                with open(body_path, "rb") as fileobj:
+                    body = fileobj.read()
+            return status, response_headers, body
+
+    def _auth_headers(self, include_repo_id=False, content_type=None,
+                      accept=None):
+        headers = {"X-UVIT-Target": self.target}
         if self.token:
-            request.add_header("Authorization", "Bearer %s" % self.token)
-        request.add_header("X-UVIT-Target", self.target)
+            headers["Authorization"] = "Bearer %s" % self.token
         if include_repo_id and self.repo_id:
-            request.add_header("X-UVIT-Repo-ID", self.repo_id)
+            headers["X-UVIT-Repo-ID"] = self.repo_id
+        if content_type:
+            headers["Content-Type"] = content_type
         if accept:
-            request.add_header("Accept", accept)
-        if method == "PUT":
+            headers["Accept"] = accept
+        return headers
+
+    def _request(self, identifier, method="GET", upload_file=None,
+                 output_file=None, include_repo_id=False, accept=None):
+        """Issues a request against <baseurl>/<identifier>.
+
+        GETs answered with a redirect (pkgs/* → presigned S3) are followed
+        with a second, credential-free request."""
+        url = self.baseurl + "/" + urllib.parse.quote(identifier)
+        content_type = None
+        if upload_file:
             resource_type = identifier.split("/", 1)[0]
             content_type = ("application/xml" if resource_type == "pkgsinfo"
                             else "application/octet-stream")
-            request.add_header("Content-Type", content_type)
-        return request
+        headers = self._auth_headers(include_repo_id, content_type, accept)
 
-    def _open(self, request):
-        """Performs the request, mapping HTTP errors to RepoError."""
-        try:
-            return self._opener.open(request, timeout=DEFAULT_TIMEOUT)
-        except urllib.error.HTTPError as err:
-            if err.code == 401:
-                raise RepoError(
-                    "HTTP 401 Unauthorized — check that UVIT_TOKEN "
-                    "(uvit_pat_…) is set and valid") from err
-            if err.code == 403:
-                raise RepoError(
-                    "HTTP 403 Forbidden — token owner is not authorized "
-                    "for the target tenant/repo") from err
+        status, response_headers, body = self._run_curl(
+            url, method, headers, upload_file, output_file)
+
+        if method == "GET" and 300 <= status <= 399:
+            location = response_headers.get("location")
+            if not location:
+                raise RepoError("HTTP %s redirect without Location" % status)
+            status, response_headers, body = self._run_curl(
+                location, "GET", {}, None, output_file)
+
+        if status == 401:
+            raise RepoError(
+                "HTTP 401 Unauthorized — check that UVIT_TOKEN "
+                "(uvit_pat_…) is set and valid")
+        if status == 403:
+            raise RepoError(
+                "HTTP 403 Forbidden — token owner is not authorized "
+                "for the target tenant/repo")
+        if not 200 <= status <= 299:
             detail = ""
-            try:
-                detail = err.read(200).decode("utf-8", errors="replace")
-            except OSError:
-                pass
+            if body:
+                detail = body[:200].decode("utf-8", errors="replace")
+            elif output_file and os.path.exists(output_file):
+                with open(output_file, "rb") as fileobj:
+                    detail = fileobj.read(200).decode(
+                        "utf-8", errors="replace")
             suffix = ": %s" % detail if detail else ""
-            raise RepoError("HTTP error %s%s" % (err.code, suffix)) from err
-        except urllib.error.URLError as err:
-            raise RepoError("Connection error: %s" % err.reason) from err
+            raise RepoError("HTTP error %s%s" % (status, suffix))
+        return body
 
     # -- Repo API ----------------------------------------------------------
 
@@ -147,48 +222,38 @@ class UVITRepo(Repo):
         resource_type = kind.split("/", 1)[0]
         if resource_type != "pkgsinfo":
             return []
-        request = self._request("pkgsinfo", accept="application/json")
-        with self._open(request) as response:
-            decoded = json.loads(response.read())
+        body = self._request("pkgsinfo", accept="application/json")
         # Server response: {"items": [{"path": "Name/1.0.plist"}, ...]}
+        decoded = json.loads(body)
         return [item["path"] for item in decoded.get("items", [])]
 
     def get(self, resource_identifier):
-        """Returns the raw bytes of a repo item.
-
-        For pkgs/* the server issues a 307 redirect to a presigned S3 URL,
-        which is followed with auth headers stripped."""
-        request = self._request(resource_identifier)
-        with self._open(request) as response:
-            return response.read()
+        """Returns the raw bytes of a repo item."""
+        return self._request(resource_identifier)
 
     def get_to_local_file(self, resource_identifier, local_file_path):
         """Streams a repo item to local_file_path."""
-        request = self._request(resource_identifier)
-        with self._open(request) as response, open(local_file_path, "wb") as fileobj:
-            shutil.copyfileobj(response, fileobj)
+        self._request(resource_identifier, output_file=local_file_path)
 
     def put(self, resource_identifier, content):
         """Uploads in-memory content to the repo. Use for pkginfo blobs."""
-        request = self._request(
-            resource_identifier, method="PUT", body=content, include_repo_id=True)
-        with self._open(request):
-            pass
+        with tempfile.NamedTemporaryFile(delete=False) as fileobj:
+            fileobj.write(content)
+            temp_path = fileobj.name
+        try:
+            self._request(
+                resource_identifier, upload_file=temp_path,
+                include_repo_id=True)
+        finally:
+            os.unlink(temp_path)
 
     def put_from_local_file(self, resource_identifier, local_file_path):
         """Streams local_file_path to the repo. Use for installer items."""
-        with open(local_file_path, "rb") as fileobj:
-            request = self._request(
-                resource_identifier, method="PUT", body=fileobj,
-                include_repo_id=True)
-            request.add_header(
-                "Content-Length", str(os.path.getsize(local_file_path)))
-            with self._open(request):
-                pass
+        self._request(
+            resource_identifier, upload_file=local_file_path,
+            include_repo_id=True)
 
     def delete(self, resource_identifier):
         """Deletes a repo item."""
-        request = self._request(
+        self._request(
             resource_identifier, method="DELETE", include_repo_id=True)
-        with self._open(request):
-            pass
