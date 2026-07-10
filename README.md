@@ -1,10 +1,16 @@
-# UVITRepo — Munki 7 repo plugin for UVIT
+# UVITRepo — Munki repo plugins for UVIT
 
-A [Munki 7](https://github.com/munki/munki) repo plugin that lets admins push
-packages directly into [UVIT](https://uvit.eigercode.ch) using `munkiimport`
-and AutoPkg's `MunkiImporter` processor.
+Repo plugins that let admins push packages directly into
+[UVIT](https://uvit.eigercode.ch) using `munkiimport` and AutoPkg's
+`MunkiImporter` processor. Two plugins, same API and configuration:
 
-Requires Munki 7.0 or later (the Swift plugin API introduced in Munki 7).
+- **`UVITRepo.plugin` (Swift)** — for [Munki 7](https://github.com/munki/munki)'s
+  Swift tools (`munkiimport` etc.), which load dylib plugins from
+  `/usr/local/munki/repoplugins/`. Requires Munki 7.0 or later.
+- **`UVITRepo.py` (Python)** — for AutoPkg's `MunkiImporter` processor, which
+  loads Munki's *Python* repo plugins (`munkilib.munkirepo`, still shipped by
+  Munki 7.x as the Munki 6.7 compatibility component). Installed at
+  `/usr/local/munki/munkilib/munkirepo/UVITRepo.py`.
 
 ## Installation
 
@@ -16,7 +22,8 @@ and install it:
 sudo installer -pkg UVITRepo-1.0.0.pkg -target /
 ```
 
-This installs `UVITRepo.plugin` into `/usr/local/munki/repoplugins/`.
+This installs `UVITRepo.plugin` into `/usr/local/munki/repoplugins/` and
+`UVITRepo.py` into `/usr/local/munki/munkilib/munkirepo/`.
 
 ## Configuration
 
@@ -106,6 +113,13 @@ The package appears in the UVIT console immediately after a successful push.
 
 ## AutoPkg
 
+AutoPkg's `MunkiImporter` does **not** use the Swift plugin — it loads Munki's
+Python repo plugins, so it uses `UVITRepo.py` (installed by the same pkg; on a
+bare CI runner just copy the file into
+`/usr/local/munki/munkilib/munkirepo/`). Munki tools must be installed too:
+`MunkiImporter` shells out to `/usr/local/munki/makepkginfo`, and the Python
+`munkilib` comes with Munki's compatibility component package.
+
 Add these variables to your AutoPkg preferences or pass them on the command line:
 
 ```xml
@@ -123,6 +137,9 @@ export UVIT_TARGET="tenant:42"
 export UVIT_REPO_ID="7"
 autopkg run com.github.autopkg.recipe.GoogleChromePkg.munki
 ```
+
+For unattended CI runs (GitHub Actions + cloud-autopkg-runner) see the
+[uvit-autopkg](https://github.com/EigerCode/uvit-autopkg) repo.
 
 ## Environment variables / preference keys
 
@@ -155,7 +172,11 @@ Header names: `Authorization: Bearer <token>`, `X-UVIT-Target: <target>`,
 
 ## Known limitations
 
-### dylib code-signing / Library Validation (must verify on a real Mac)
+### dylib code-signing / Library Validation (Swift plugin only; must verify on a real Mac)
+
+This affects only `UVITRepo.plugin` loaded by Munki's Swift tools. AutoPkg
+runs are unaffected — they use the Python plugin, which involves no dylib
+loading.
 
 macOS Library Validation requires that a dylib loaded by a hardened process
 either shares the same Apple Developer Team ID as the host binary, or that
