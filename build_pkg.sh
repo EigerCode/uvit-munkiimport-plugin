@@ -3,7 +3,10 @@
 #
 # Usage: ./build_pkg.sh
 #
-# The .pkg installs UVITRepo.plugin into /usr/local/munki/repoplugins/.
+# The .pkg installs UVITRepo.plugin into /usr/local/munki/repoplugins/
+# (Swift plugin, used by Munki 7's munkiimport) and UVITRepo.py into
+# /usr/local/munki/munkilib/munkirepo/ (Python plugin, used by AutoPkg's
+# MunkiImporter via the munkilib compatibility libraries).
 # Signing and notarization are handled by the CI release workflow; this
 # script is for local/manual builds.
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
@@ -55,6 +58,10 @@ chmod -R 755 "${PKG_ROOT}"
 
 cp "${BUILD_DIR}/Build/Products/Release/${TOOL}.plugin" \
    "${PKG_ROOT}/usr/local/munki/repoplugins/"
+
+mkdir -p "${PKG_ROOT}/usr/local/munki/munkilib/munkirepo"
+cp "${THISDIR}/${TOOL}.py" \
+   "${PKG_ROOT}/usr/local/munki/munkilib/munkirepo/"
 
 echo "Building pkg for ${TOOL} v${VERSION}..."
 pkgbuild \
