@@ -64,6 +64,32 @@ private func throwIfStatusNotOK(_ response: URLResponse, body: Data = Data()) th
     }
 }
 
+/// Strips UVIT auth headers when a request is redirected off the console host.
+///
+/// `URLSession` preserves method and body across a 307/308 redirect (which is
+/// exactly what console#575's presigned-PUT redirect relies on), but by
+/// default it also carries the original request's headers to the new host —
+/// including `Authorization`, which would leak the UVIT bearer token to S3.
+/// The presigned URL carries its own auth in the query string, so no headers
+/// are needed on the redirect leg at all.
+///
+/// An old console (pre-#575) never sends a redirect on PUT, so this delegate
+/// is simply never invoked against one.
+private final class StripAuthOnRedirect: NSObject, URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest
+    ) async -> URLRequest? {
+        var stripped = request
+        stripped.setValue(nil, forHTTPHeaderField: "Authorization")
+        stripped.setValue(nil, forHTTPHeaderField: "X-UVIT-Target")
+        stripped.setValue(nil, forHTTPHeaderField: "X-UVIT-Repo-ID")
+        return stripped
+    }
+}
+
 // MARK: - UVITRepo
 
 /// Munki 7 repo plugin that targets the UVIT /api/repo HTTP ingest API.
@@ -102,7 +128,7 @@ private func throwIfStatusNotOK(_ response: URLResponse, body: Data = Data()) th
 /// | `list(<other>)`                         | returns [] (server-side follow-up needed)  |
 /// | `get("pkgsinfo/<name>/<ver>.plist")`    | `GET <baseURL>/pkgsinfo/<name>/<ver>.plist`|
 /// | `get("pkgs/<path>")`                    | `GET <baseURL>/pkgs/<path>` (307 redirect) |
-/// | `put("pkgs/<path>", fromFile:)`         | `PUT <baseURL>/pkgs/<path>`                |
+/// | `put("pkgs/<path>", fromFile:)`         | `PUT <baseURL>/pkgs/<path>` (307 redirect) |
 /// | `put("pkgsinfo/<path>", content:)`      | `PUT <baseURL>/pkgsinfo/<path>`            |
 /// | `delete("pkgsinfo/<path>")`             | `DELETE <baseURL>/pkgsinfo/<path>`         |
 /// | `delete("pkgs/<path>")`                 | `DELETE <baseURL>/pkgs/<path>`             |
@@ -228,11 +254,13 @@ class UVITRepo: Repo {
     /// Returns the raw bytes of a repo item.
     ///
     /// For `pkgsinfo/*` this is the plist blob. For `pkgs/*` the server issues
-    /// a 307 redirect to a presigned S3 URL; URLSession follows it automatically.
+    /// a 307 redirect to a presigned S3 URL; URLSession follows it
+    /// automatically, and StripAuthOnRedirect keeps the UVIT bearer token
+    /// from being forwarded to S3 on that redirect leg.
     func get(_ identifier: String) async throws -> Data {
         let itemURL = url(appending: identifier)
         let request = baseRequest(itemURL)
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await URLSession.shared.data(for: request, delegate: StripAuthOnRedirect())
         try throwIfStatusNotOK(response, body: data)
         return data
     }
@@ -246,6 +274,9 @@ class UVITRepo: Repo {
     /// Uploads in-memory `content` to the repo at `identifier`.
     ///
     /// Use for pkgsinfo blobs. For large installer binaries prefer `put(_:fromFile:)`.
+    ///
+    /// pkgsinfo PUTs are not redirected server-side (only pkgs/* is, per
+    /// console#575), but the delegate is harmless either way.
     func put(_ identifier: String, content: Data) async throws {
         let itemURL = url(appending: identifier)
         var request = baseRequest(itemURL, includeRepoID: true)
@@ -256,7 +287,8 @@ class UVITRepo: Repo {
         } else {
             request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
         }
-        let (responseData, response) = try await URLSession.shared.upload(for: request, from: content)
+        let (responseData, response) = try await URLSession.shared.upload(
+            for: request, from: content, delegate: StripAuthOnRedirect())
         try throwIfStatusNotOK(response, body: responseData)
     }
 
@@ -264,6 +296,12 @@ class UVITRepo: Repo {
     ///
     /// Use for installer binaries (pkgs/*). URLSession streams the file without
     /// loading it entirely into memory.
+    ///
+    /// Since console#575, PUT pkgs/* answers with a 307 to a presigned S3 PUT
+    /// URL; URLSession follows it (re-sending method + body, which is why
+    /// 307/308 exist), but StripAuthOnRedirect keeps the UVIT bearer token
+    /// from leaking to S3 on that redirect leg. An old console (pre-#575)
+    /// never sends a redirect here, so this is a no-op against one.
     func put(_ identifier: String, fromFile local_file_path: String) async throws {
         let itemURL = url(appending: identifier)
         var request = baseRequest(itemURL, includeRepoID: true)
@@ -275,7 +313,8 @@ class UVITRepo: Repo {
             request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
         }
         let localFile = URL(fileURLWithPath: local_file_path)
-        let (responseData, response) = try await URLSession.shared.upload(for: request, fromFile: localFile)
+        let (responseData, response) = try await URLSession.shared.upload(
+            for: request, fromFile: localFile, delegate: StripAuthOnRedirect())
         try throwIfStatusNotOK(response, body: responseData)
     }
 

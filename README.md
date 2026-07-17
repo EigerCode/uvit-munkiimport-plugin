@@ -160,7 +160,7 @@ Preferences domain: `ch.eigercode.uvit.munkiimport`
 | `list(<other kind>)`                   | returns `[]` (see Known Limitations below)      | —                                |
 | `get("pkgsinfo/<name>/<ver>.plist")`   | `GET <repo_url>/pkgsinfo/<name>/<ver>.plist`    | Auth + Target                    |
 | `get("pkgs/<path>")`                   | `GET <repo_url>/pkgs/<path>` → 307 to S3        | Auth + Target                    |
-| `put("pkgs/<path>", fromFile:)`        | `PUT <repo_url>/pkgs/<path>`                    | Auth + Target + Repo-ID          |
+| `put("pkgs/<path>", fromFile:)`        | `PUT <repo_url>/pkgs/<path>` → 307 to S3        | Auth + Target + Repo-ID          |
 | `put("pkgsinfo/<path>", content:)`     | `PUT <repo_url>/pkgsinfo/<path>`                | Auth + Target + Repo-ID          |
 | `delete("pkgsinfo/<path>")`            | `DELETE <repo_url>/pkgsinfo/<path>`             | Auth + Target + Repo-ID          |
 | `delete("pkgs/<path>")`                | `DELETE <repo_url>/pkgs/<path>`                 | Auth + Target + Repo-ID          |
@@ -169,6 +169,14 @@ Preferences domain: `ch.eigercode.uvit.munkiimport`
 
 Header names: `Authorization: Bearer <token>`, `X-UVIT-Target: <target>`,
 `X-UVIT-Repo-ID: <repoID>`.
+
+### Presigned pkg uploads (307 redirect)
+
+Both plugins follow a `307 Temporary Redirect` on `PUT pkgs/<path>` to a
+presigned S3 PUT URL and re-send the file bytes there, without forwarding the
+`Authorization`/`X-UVIT-*` headers (the presigned URL carries its own auth).
+An older console that predates this (pre-`uvit-console`#575) never sends a
+redirect on that PUT, so both plugins keep working against it unchanged.
 
 ## Known limitations
 

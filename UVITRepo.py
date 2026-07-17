@@ -172,7 +172,11 @@ class UVITRepo(Repo):
         """Issues a request against <baseurl>/<identifier>.
 
         GETs answered with a redirect (pkgs/* → presigned S3) are followed
-        with a second, credential-free request."""
+        with a second, credential-free request. PUTs of a pkg installer are
+        answered the same way since console#506: a 307 to a presigned S3 PUT
+        URL that the client must re-PUT the file to (an old console without
+        #506 never sends a redirect here, so this branch simply won't
+        trigger against it)."""
         url = self.baseurl + "/" + urllib.parse.quote(identifier)
         content_type = None
         if upload_file:
@@ -184,12 +188,17 @@ class UVITRepo(Repo):
         status, response_headers, body = self._run_curl(
             url, method, headers, upload_file, output_file)
 
-        if method == "GET" and 300 <= status <= 399:
+        redirectable = method == "GET" or (method == "PUT" and upload_file)
+        if redirectable and 300 <= status <= 399:
             location = response_headers.get("location")
             if not location:
                 raise RepoError("HTTP %s redirect without Location" % status)
+            # No headers on the redirect request: S3's presigned URL carries
+            # its own auth in the query string, and forwarding the UVIT
+            # bearer token to a third-party host would leak it. upload_file
+            # (if set) makes _run_curl PUT regardless of the method argument.
             status, response_headers, body = self._run_curl(
-                location, "GET", {}, None, output_file)
+                location, "GET", {}, upload_file, output_file)
 
         if status == 401:
             raise RepoError(
